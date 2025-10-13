@@ -971,60 +971,132 @@ mod internal {
 
         // thank you ffmpeg
         pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
+            use std::ptr;
             self.lock()?;
+
+            // Fetch available formats
             let format_list = try_ns_arr_to_vec::<AVCaptureDeviceFormat, NokhwaError>(unsafe {
                 msg_send![self.inner, formats]
             })?;
+            // println!("[set_all] Available formats: {:?}", format_list);
+
             let format_description_sel = sel!(formatDescription);
+            let mut selected_format: *mut Object = ptr::null_mut();
+            let mut selected_range: *mut Object = ptr::null_mut();
+            let mut selected_min_fps = 0.0;
+            let mut selected_max_fps = 0.0;
 
-            let mut selected_format: *mut Object = std::ptr::null_mut();
-            let mut selected_range: *mut Object = std::ptr::null_mut();
+            let requested_width = descriptor.resolution().width() as i32;
+            let requested_height = descriptor.resolution().height() as i32;
+            let requested_fps = f64::from(descriptor.frame_rate());
 
-            for format in format_list {
+            // println!(
+            //     "[set_all] Requesting {}x{} @ {} FPS",
+            //     requested_width, requested_height, requested_fps
+            // );
+
+            // Find a compatible format
+            'format_loop: for format in format_list {
                 let format_desc_ref: CMFormatDescriptionRef =
                     unsafe { msg_send![format.internal, performSelector: format_description_sel] };
                 let dimensions = unsafe { CMVideoFormatDescriptionGetDimensions(format_desc_ref) };
 
-                if dimensions.height == descriptor.resolution().height() as i32
-                    && dimensions.width == descriptor.resolution().width() as i32
+                // Compare resolution — allow flipped dimensions (portrait mode)
+                if !((dimensions.width == requested_width && dimensions.height == requested_height)
+                    || (dimensions.width == requested_height && dimensions.height == requested_width))
                 {
-                    selected_format = format.internal;
+                    continue;
+                }
 
-                    for range in ns_arr_to_vec::<AVFrameRateRange>(unsafe {
-                        msg_send![format.internal, videoSupportedFrameRateRanges]
-                    }) {
-                        let max_fps: f64 = unsafe { msg_send![range.inner, maxFrameRate] };
-                        // Older Apple cameras (i.e. iMac 2013) return 29.97000002997 as FPS.
-                        if (f64::from(descriptor.frame_rate()) - max_fps).abs() < 0.999 {
-                            selected_range = range.inner;
-                            break;
-                        }
+                // println!(
+                //     "[set_all] Found candidate format: {}x{}, fourcc: {}",
+                //     dimensions.width, dimensions.height, format.fourcc
+                // );
+
+                // Iterate supported framerate ranges
+                for range in ns_arr_to_vec::<AVFrameRateRange>(unsafe {
+                    msg_send![format.internal, videoSupportedFrameRateRanges]
+                }) {
+                    let min_fps: f64 = unsafe { msg_send![range.inner, minFrameRate] };
+                    let max_fps: f64 = unsafe { msg_send![range.inner, maxFrameRate] };
+
+                    // println!(
+                    //     "[set_all]   Supported FPS range: {:.3} - {:.3}",
+                    //     min_fps, max_fps
+                    // );
+
+                    // If requested FPS is inside the range, use it
+                    if requested_fps >= min_fps - 0.001 && requested_fps <= max_fps + 0.001 {
+                        selected_format = format.internal;
+                        selected_range = range.inner;
+                        selected_min_fps = min_fps;
+                        selected_max_fps = max_fps;
+                        // println!(
+                        //     "[set_all]   ✅ Selected range: {:.3} - {:.3}",
+                        //     min_fps, max_fps
+                        // );
+                        break 'format_loop;
                     }
                 }
             }
-            if selected_range.is_null() || selected_format.is_null() {
+
+            // If no matching format or range was found, bail out gracefully
+            if selected_format.is_null() || selected_range.is_null() {
+                self.unlock();
                 return Err(NokhwaError::SetPropertyError {
                     property: "CameraFormat".to_string(),
                     value: descriptor.to_string(),
-                    error: "Not Found/Rejected/Unsupported".to_string(),
+                    error: "No matching resolution/FPS range found".to_string(),
                 });
             }
 
-            let activefmtkey = str_to_nsstr("activeFormat");
-            let min_frame_duration = str_to_nsstr("minFrameDuration");
-            let active_video_min_frame_duration = str_to_nsstr("activeVideoMinFrameDuration");
-            let active_video_max_frame_duration = str_to_nsstr("activeVideoMaxFrameDuration");
-            let _: () =
-                unsafe { msg_send![self.inner, setValue:selected_format forKey:activefmtkey] };
-            let min_frame_duration: *mut Object =
-                unsafe { msg_send![selected_range, valueForKey: min_frame_duration] };
-            let _: () = unsafe {
-                msg_send![self.inner, setValue:min_frame_duration forKey:active_video_min_frame_duration]
-            };
-            let _: () = unsafe {
-                msg_send![self.inner, setValue:min_frame_duration forKey:active_video_max_frame_duration]
-            };
+            // println!(
+            //     "[set_all] Using format with FPS range {:.3} - {:.3}",
+            //     selected_min_fps, selected_max_fps
+            // );
+
+            // Apply format safely
+            unsafe {
+                let activefmtkey = str_to_nsstr("activeFormat");
+                let min_frame_duration_key = str_to_nsstr("minFrameDuration");
+                let active_video_min_frame_duration = str_to_nsstr("activeVideoMinFrameDuration");
+                let active_video_max_frame_duration = str_to_nsstr("activeVideoMaxFrameDuration");
+
+                // Double check pointers before msg_send!
+                if !selected_format.is_null() {
+                    let _: () = msg_send![self.inner, setValue: selected_format forKey: activefmtkey];
+                } else {
+                    self.unlock();
+                    return Err(NokhwaError::SetPropertyError {
+                        property: "CameraFormat".to_string(),
+                        value: descriptor.to_string(),
+                        error: "selected_format is NULL".to_string(),
+                    });
+                }
+
+                // Only set frame duration if valid
+                if !selected_range.is_null() {
+                    let min_frame_duration: *mut Object =
+                        msg_send![selected_range, valueForKey: min_frame_duration_key];
+                    if !min_frame_duration.is_null() {
+                        let _: () = msg_send![
+                    self.inner,
+                    setValue: min_frame_duration forKey: active_video_min_frame_duration
+                ];
+                        let _: () = msg_send![
+                    self.inner,
+                    setValue: min_frame_duration forKey: active_video_max_frame_duration
+                ];
+                    } else {
+                        // println!("[set_all] ⚠️ min_frame_duration is NULL, skipping duration set.");
+                    }
+                } else {
+                    // println!("[set_all] ⚠️ selected_range is NULL, skipping duration set.");
+                }
+            }
+
             self.unlock();
+            // println!("[set_all] ✅ Camera format successfully applied.");
             Ok(())
         }
 
