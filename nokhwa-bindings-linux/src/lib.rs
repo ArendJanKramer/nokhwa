@@ -141,68 +141,11 @@ mod internal {
     }
 
     fn new_shared_device(index: usize) -> Result<SharedDevice, NokhwaError> {
-        let mut devices = DEVICES
-            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-            .lock()
-            .map_err(|e| NokhwaError::InitializeError {
-                backend: ApiBackend::Video4Linux,
-                error: format!("Fail to lock global device list mutex: {}", e),
-            })?;
-
-        // do some cleanup, this will avoid here memory to grow forever
-        // if for some reason someone has tons of camera plugged in
-        cleanup_dropped_devices(&mut devices);
-
-        if let Some(entry) = devices.iter().find(|entry| entry.index == index) {
-            if let Some(device) = entry.device.upgrade() {
-                return Ok(device);
-            }
-        }
-
-        // Cleanup a second, the device we are interested might have been dropped during before upgrade call
-        // For this point on we are assured that the device is not in the list
-        cleanup_dropped_devices(&mut devices);
-
-        // Let's be extra sure, this code should never panic, but maybe will help catch some race condition
-        assert!(
-            devices.iter().find(|entry| entry.index == index).is_none(),
-            "Device {index} should not be in the list"
-        );
-
-        // Now we can open the device, and never run into a busy io error,
-        // as long as the device isn't opened by other programs.
-        let device = match Device::new(index) {
-            Ok(dev) => dev,
-            Err(why) => {
-                return Err(NokhwaError::OpenDeviceError(
-                    index.to_string(),
-                    format!("V4L2 Error: {}", why),
-                ))
-            }
-        };
-
-        let device = std::sync::Arc::new(std::sync::Mutex::new(device));
-        devices.push(WeakSharedDeviceEntry {
-            device: std::sync::Arc::downgrade(&device),
-            index,
-        });
-
-        // Last check to be sure that every devices have a unique index
-        // and that the data isn't corrupted
-        if devices.len() > 1 {
-            assert_eq!(
-                devices
-                    .windows(2)
-                    .filter(|window| window[0].index == window[1].index)
-                    .count(),
-                devices.len(),
-                "Device list should not contain duplicate indexes"
-            );
-        }
-
-        Ok(device)
+        let device = Device::new(index).map_err(|why| {
+            NokhwaError::OpenDeviceError(index.to_string(), format!("V4L2 Error: {}", why))
+        })?;
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(device)))
     }
-
     fn get_device_format(device: &Device) -> Result<CameraFormat, NokhwaError> {
         match device.format() {
             Ok(format) => {
