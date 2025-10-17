@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::panic;
 use crate::{
     error::NokhwaError,
     pixel_format::FormatDecoder,
@@ -77,15 +78,38 @@ impl Buffer {
     pub fn decode_image<F: FormatDecoder>(
         &self,
     ) -> Result<ImageBuffer<F::Output, Vec<u8>>, NokhwaError> {
-        let new_data = F::write_output(self.source_frame_format, self.resolution, &self.buffer)?;
-        let image =
-            ImageBuffer::from_raw(self.resolution.width_x, self.resolution.height_y, new_data)
+        let result = panic::catch_unwind(|| {
+            // This entire decode process might panic internally,
+            // For example on mozjpeg, when a faulty frame arrives from mjpeg stream
+            let new_data = F::write_output(self.source_frame_format, self.resolution, &self.buffer)?;
+            let image = ImageBuffer::from_raw(self.resolution.width_x, self.resolution.height_y, new_data)
                 .ok_or(NokhwaError::ProcessFrameError {
                     src: self.source_frame_format,
                     destination: stringify!(F).to_string(),
                     error: "Failed to create buffer".to_string(),
                 })?;
-        Ok(image)
+            Ok(image)
+        });
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(panic_payload) => {
+                // Try to capture the panic message (if any)
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+
+                Err(NokhwaError::ProcessFrameError {
+                    src: self.source_frame_format,
+                    destination: stringify!(F).to_string(),
+                    error: format!("Decoding panicked: {}", panic_msg),
+                })
+            }
+        }
     }
 
     /// Decodes a image with allocation using the provided [`FormatDecoder`] into a `buffer`.
