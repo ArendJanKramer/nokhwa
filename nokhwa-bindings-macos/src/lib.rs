@@ -932,7 +932,7 @@ mod internal {
             }
         }
 
-        pub fn lock(&self) -> Result<(), NokhwaError> {
+        pub fn lock(&mut self) -> Result<(), NokhwaError> {
             if self.locked {
                 return Ok(());
             }
@@ -959,6 +959,7 @@ mod internal {
                     error: "Lock Rejected".to_string(),
                 });
             }
+            self.locked = true;
             Ok(())
         }
 
