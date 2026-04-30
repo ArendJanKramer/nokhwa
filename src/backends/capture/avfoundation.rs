@@ -239,14 +239,14 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn open_stream(&mut self) -> Result<(), NokhwaError> {
-        self.refresh_camera_format()?;
+        // Set format on device before creating the session, so the session
+        // picks up the device's current activeFormat instead of overriding it.
+        self.device.set_all(self.format)?;
 
         let input = AVCaptureDeviceInput::new(&self.device)?;
         let session = AVCaptureSession::new();
         session.begin_configuration();
         session.add_input(&input)?;
-
-        self.device.set_all(self.format)?; // hurr durr im an apple api and im fucking dumb hurr durr
 
         let bufname = &self.buffer_name;
         let videocallback = AVCaptureVideoCallback::new(bufname, &self.fbufsnd)?;
@@ -279,7 +279,6 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn frame(&mut self) -> Result<Buffer, NokhwaError> {
-        self.refresh_camera_format()?;
         let cfmt = self.camera_format();
         let b = self.frame_raw()?;
         let buffer = Buffer::new(cfmt.resolution(), b.as_ref(), cfmt.format());
