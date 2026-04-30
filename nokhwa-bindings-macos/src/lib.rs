@@ -1058,14 +1058,13 @@ mod internal {
 
             // Apply format safely
             unsafe {
-                let activefmtkey = str_to_nsstr("activeFormat");
                 let min_frame_duration_key = str_to_nsstr("minFrameDuration");
                 let active_video_min_frame_duration = str_to_nsstr("activeVideoMinFrameDuration");
                 let active_video_max_frame_duration = str_to_nsstr("activeVideoMaxFrameDuration");
 
                 // Double check pointers before msg_send!
                 if !selected_format.is_null() {
-                    let _: () = msg_send![self.inner, setValue: selected_format forKey: activefmtkey];
+                    let _: () = msg_send![self.inner, setActiveFormat: selected_format];
                 } else {
                     self.unlock();
                     return Err(NokhwaError::SetPropertyError {

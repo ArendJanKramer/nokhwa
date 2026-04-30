@@ -239,10 +239,6 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn open_stream(&mut self) -> Result<(), NokhwaError> {
-        // Set format on device before creating the session, so the session
-        // picks up the device's current activeFormat instead of overriding it.
-        self.device.set_all(self.format)?;
-
         let input = AVCaptureDeviceInput::new(&self.device)?;
         let session = AVCaptureSession::new();
         session.begin_configuration();
@@ -256,6 +252,8 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
         session.add_output(&output)?;
         session.commit_configuration();
         session.start()?;
+        self.device.set_all(self.format)?;
+        while self.frame_buffer_receiver.try_recv().is_ok() {}
 
         self.dev_input = Some(input);
         self.session = Some(session);
@@ -279,6 +277,7 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn frame(&mut self) -> Result<Buffer, NokhwaError> {
+        self.refresh_camera_format()?;
         let cfmt = self.camera_format();
         let b = self.frame_raw()?;
         let buffer = Buffer::new(cfmt.resolution(), b.as_ref(), cfmt.format());
